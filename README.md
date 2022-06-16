@@ -18,7 +18,9 @@ generate folders
 from polygon (segmentation, annotation) to ...
 
 ## About configuration
-Please configure these properties and make sure they stay in `config.json` in the same folder as main.py
+Please configure these properties and make sure they stay in `config.json` in the same folder as `main.py`.
+For example,
+
     "input_dir": "./chosen_bg_images_all/*.jpg",
     "output_dir": "./results/",
     "output_original_image": true,
