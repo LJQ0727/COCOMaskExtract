@@ -3,6 +3,7 @@ import numpy as np
 from PIL import Image
 import os
 import shutil   # for copy original image
+import torch
 
 from termcolor import colored   # print colored warnings, errors
 from typing import Dict, List, Any
@@ -13,6 +14,8 @@ from tqdm import tqdm       # Status display
 from maskUtils import polygons_to_bitmask, rle_to_bitmask
 
 g_PATH_TO_CONFIG = './config.json'      # Set this to the config file
+if torch.cuda.is_available(): device = torch.device('cuda')
+else: device = torch.device('cpu')
 
 class Config:
     # Defaults
@@ -49,22 +52,20 @@ class Config:
 
 
 
-def mask_to_png(mask_arr: np.ndarray):
-    rgb_arr = np.zeros((mask_arr.shape[0], mask_arr.shape[1], 3), dtype='uint8')
-    def map_to_rgb(is_white: bool):
-        if is_white: 
-            return np.array([255,255,255])
-        else: return np.array([0,0,0])
-    # Convert to RGB
-    
-    for row_num, row in enumerate(mask_arr):
-        for col_num, entry in enumerate(row):
-            rgb_arr[row_num][col_num] = map_to_rgb(entry)
+def mask_to_png_and_save(mask_arr: np.ndarray, dest_path: str):
+    # Use GPU to accelerate
+    mask_arr = torch.tensor(mask_arr, dtype=torch.uint8).to(device)
+    mask_arr = 255 * mask_arr
+    rgb_arr = torch.stack([mask_arr, mask_arr, mask_arr], dim=2)
 
-    
-    img = Image.fromarray(rgb_arr,mode='RGB')
-    
-    return img
+    # We want this to be async
+    # TODO
+    def save_img(tensor: torch.Tensor, dest_path: str):
+        
+        img = Image.fromarray(tensor.cpu().numpy(),mode='RGB')
+        img.save(dest_path)
+
+    save_img(rgb_arr, dest_path)
 
 
 
@@ -133,8 +134,8 @@ def main():
             else: mask_arr = rle_to_bitmask(seg_catid_dict['segmentation'])
             cat_name = query_category_name(cat_list, seg_catid_dict['cat_id'])
 
-            img = mask_to_png(mask_arr)
-            img.save(os.path.join(config.output_dir, filenamenoext, f'{index}_{cat_name}.png'))
+            mask_to_png_and_save(mask_arr, os.path.join(config.output_dir, filenamenoext, f'{index}_{cat_name}.png'))
+
 
             if config.output_original_image:
                 shutil.copy(src_img_path, os.path.join(config.output_dir, filenamenoext))
