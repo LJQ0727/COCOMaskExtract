@@ -16,9 +16,9 @@ def polygons_to_bitmask(polygons: List[np.ndarray], height: int, width: int) -> 
     assert len(polygons) > 0, "COCOAPI does not support empty polygons"
     rles = mask_util.frPyObjects(polygons, height, width)
     rle = mask_util.merge(rles)
-    return mask_util.decode(rle).astype(np.bool)
+    return mask_util.decode(rle).astype(np.uint8)
 
 def rle_to_bitmask(rle):
     rle = mask_util.frPyObjects(rle, rle.get('size')[0], rle.get('size')[1])
 
-    return mask_util.decode(rle).astype(np.bool)
+    return mask_util.decode(rle).astype(np.uint8)
