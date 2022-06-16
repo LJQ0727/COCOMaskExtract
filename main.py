@@ -4,6 +4,7 @@ from PIL import Image
 import os
 import shutil   # for copy original image
 import torch
+import asyncio
 
 from termcolor import colored   # print colored warnings, errors
 from typing import Dict, List, Any
@@ -14,6 +15,8 @@ from tqdm import tqdm       # Status display
 from maskUtils import polygons_to_bitmask, rle_to_bitmask
 
 g_PATH_TO_CONFIG = './config.json'      # Set this to the config file
+g_NUM_PROCESSES = 4
+
 if torch.cuda.is_available(): device = torch.device('cuda')
 else: device = torch.device('cpu')
 
@@ -49,10 +52,12 @@ class Config:
         parent_dict = json.loads(tmpStr)   # The parsed dictionary object, containing annotations for all used categories
         return parent_dict
 
+config = Config(g_PATH_TO_CONFIG)
+parent_dict = config.get_parent_ann_dict()
 
 
 
-def mask_to_png_and_save(mask_arr: np.ndarray, dest_path: str):
+async def mask_to_png_and_save(mask_arr: np.ndarray, dest_path: str):
     # Use GPU to accelerate
     mask_arr = torch.tensor(mask_arr, dtype=torch.uint8).to(device)
     mask_arr = 255 * mask_arr
@@ -60,13 +65,12 @@ def mask_to_png_and_save(mask_arr: np.ndarray, dest_path: str):
 
     # We want this to be async
     # TODO
-    def save_img(tensor: torch.Tensor, dest_path: str):
+    async def save_img(tensor: torch.Tensor, dest_path: str):
         
         img = Image.fromarray(tensor.cpu().numpy(),mode='RGB')
         img.save(dest_path)
 
-    save_img(rgb_arr, dest_path)
-
+    asyncio.create_task(save_img(rgb_arr, dest_path))
 
 
 def query_img_height_width(img_list: List[Dict], target_id: int):
@@ -102,45 +106,46 @@ def parse_id_filenamenoext(path: str) -> int:
 
     return int(id_string), filenamenoext
 
+def extract_mask(src_img_path: str):
+    id, filenamenoext = parse_id_filenamenoext(src_img_path)
 
-def main():
+    # Annotation list, contains `segmentation`, `category_id`
+    ann_list = parent_dict['annotations']
+    # Images list, contains image `width` and `height`
+    img_list = parent_dict['images']
+    # Category list, contains `name` and `id`(category id)
+    cat_list = parent_dict['categories']
+
+    img_height, img_width = query_img_height_width(img_list, id)
+    segmentation_list = query_segmentation_catid_list(ann_list, id)
+
+    
+    async def copy_original_image():
+        shutil.copy(src_img_path, os.path.join(config.output_dir, filenamenoext))
+
+    if not os.path.isdir(os.path.join(config.output_dir, filenamenoext)): os.mkdir(os.path.join(config.output_dir, filenamenoext))
+
+    if config.output_original_image: asyncio.create_task(copy_original_image())
+    for index, seg_catid_dict in enumerate(segmentation_list):
+        cat_name = query_category_name(cat_list, seg_catid_dict['cat_id'])
+        if isinstance(seg_catid_dict['segmentation'], List):
+            mask_arr = polygons_to_bitmask(seg_catid_dict['segmentation'], img_height, img_width)
+        else: mask_arr = rle_to_bitmask(seg_catid_dict['segmentation'])
+        
+        asyncio.create_task(mask_to_png_and_save(mask_arr, os.path.join(config.output_dir, filenamenoext, f'{index}_{cat_name}.png')))
+
+
+
+async def main():
+
     # The procedures
-    config = Config(g_PATH_TO_CONFIG)
     if (not os.path.isdir(config.output_dir)): os.mkdir(config.output_dir)
     img_paths = config.get_img_paths()
     print(f'Starting to process {len(img_paths)} images')
-    parent_dict = config.get_parent_ann_dict()
 
-    for src_img_path in tqdm(img_paths):
-        id, filenamenoext = parse_id_filenamenoext(src_img_path)
-
-        # Annotation list, contains `segmentation`, `category_id`
-        ann_list = parent_dict['annotations']
-        # Images list, contains image `width` and `height`
-        img_list = parent_dict['images']
-        # Category list, contains `name` and `id`(category id)
-        cat_list = parent_dict['categories']
-
-        img_height, img_width = query_img_height_width(img_list, id)
-        segmentation_list = query_segmentation_catid_list(ann_list, id)
-
-        if len(segmentation_list) == 0:
-            colored(f'Warning: cannot find segmentation info of image id {id}')
-            continue
-        if not os.path.isdir(os.path.join(config.output_dir, filenamenoext)): os.mkdir(os.path.join(config.output_dir, filenamenoext))
-        for index, seg_catid_dict in enumerate(segmentation_list):
-            if isinstance(seg_catid_dict['segmentation'], List):
-                mask_arr = polygons_to_bitmask(seg_catid_dict['segmentation'], img_height, img_width)   # This is the true-false mask
-            else: mask_arr = rle_to_bitmask(seg_catid_dict['segmentation'])
-            cat_name = query_category_name(cat_list, seg_catid_dict['cat_id'])
-
-            mask_to_png_and_save(mask_arr, os.path.join(config.output_dir, filenamenoext, f'{index}_{cat_name}.png'))
-
-
-            if config.output_original_image:
-                shutil.copy(src_img_path, os.path.join(config.output_dir, filenamenoext))
-
-
+    for img_path in tqdm(img_paths):
+        extract_mask(img_path)
+    print('Process ended successfully')
 
 
 
@@ -148,4 +153,6 @@ def main():
 
 
 if (__name__ == '__main__'):
-    main()
+    asyncio.run(main())
+
+    
