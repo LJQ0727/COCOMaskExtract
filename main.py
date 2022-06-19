@@ -4,7 +4,8 @@ from PIL import Image
 import os
 import shutil   # for copy original image
 import torch
-# import cv2
+import pickle
+import cv2
 
 from termcolor import colored   # print colored warnings, errors
 from typing import Dict, List, Any
@@ -25,7 +26,9 @@ class Config:
     output_dir = './results/'
     output_original_image = True
     path_to_config = g_PATH_TO_CONFIG
-    mask_out_threshold = 0.1    # Mask area space / total area 
+    mask_lower_threshold = 0.2    # Mask area space / total area 
+    mask_upper_threshold = 0.4    # Mask area space / total area 
+    dilation_kernel_size = 10
     # Too small masks will be ignored
 
     def __init__(self, path_to_config) -> None:
@@ -37,7 +40,11 @@ class Config:
                 self.annotation_path = config_dict['annotation_path']
                 self.output_dir = config_dict['output_dir']
                 self.output_original_image = config_dict['output_original_image']
-                self.mask_out_threshold = config_dict['mask_out_threshold']
+                self.mask_lower_threshold = config_dict['mask_lower_threshold']
+                self.mask_upper_threshold = config_dict['mask_upper_threshold']
+                self.dilation_kernel_size = config_dict['dilation_kernel_size']
+
+                
 
     def get_img_paths(self) -> List:
         '''
@@ -58,12 +65,10 @@ class Config:
 
 def mask_to_png_and_save(mask_arr, dest_path: str, accept = True):
     # Use GPU to accelerate
-    mask_arr = torch.tensor(mask_arr, dtype=torch.uint8).to(device)
+    # mask_arr = torch.tensor(mask_arr, dtype=torch.uint8).to(device)
     mask_arr = 255 * mask_arr
     rgb_arr = torch.stack([mask_arr, mask_arr, mask_arr], dim=2)
 
-    # kernel = np.ones((3, 3), dtype=np.uint8)
-    # dilate = cv2.dilate(rgb_arr.cpu().numpy(), kernel, 1)
     def save_img(tensor, dest_path: str):
         
         img = Image.fromarray(tensor,mode='RGB')
@@ -91,7 +96,7 @@ def query_segmentation_catid_list(ann_list: List[Dict], target_id: int) -> List:
     return returnList
 
 def get_mask_space(mask):
-    mask = torch.tensor(mask).to(device)
+    # mask = torch.tensor(mask).to(device)
     return float(torch.sum(mask)) / (mask.shape[0] * mask.shape[1])
 
 def query_category_name(cat_list: List, target_cat_id: int):
@@ -141,8 +146,7 @@ def main():
         if not os.path.isdir(target_dir):
             os.mkdir(target_dir)
 
-        masks_info = []
-
+        masks_info = dict()
 
         for i, seg_catid_dict in enumerate(segmentation_list):
             if isinstance(seg_catid_dict['segmentation'], List):
@@ -150,28 +154,37 @@ def main():
             else: mask_arr = rle_to_bitmask(seg_catid_dict['segmentation'])
             cat_name = query_category_name(cat_list, seg_catid_dict['cat_id'])
 
-            masks_info.append([cat_name, mask_arr, get_mask_space(mask_arr)])
+            kernel = np.ones((config.dilation_kernel_size, config.dilation_kernel_size), dtype=np.uint8)
+            mask_arr = cv2.dilate(mask_arr, kernel, 1)
             
+            mask_arr = torch.tensor(mask_arr).to(device)
 
-            
-        masks_info.sort(key=lambda x: x[2], reverse=True)
-        target_cat_names = set()
-        for mask_info in masks_info:
-            if mask_info[2] >= config.mask_out_threshold:
-                target_cat_names.add(mask_info[0])
+            masks_info[cat_name] = torch.logical_or(masks_info.get(cat_name, torch.zeros(mask_arr.shape).to(device)), mask_arr).to(dtype=torch.uint8)
 
-        if len(target_cat_names) == 0:
+        file_idx = 0
+        pop_cats = []
+        for (cat_name, mask) in masks_info.items():
+            space = get_mask_space(mask)
+            if cat_name not in pop_cats:
+                if space >= config.mask_lower_threshold and space <= config.mask_upper_threshold:
+                    out_filename = os.path.join(config.output_dir, filenamenoext, f'{file_idx}_{cat_name}.png')
+                    mask_to_png_and_save(mask, out_filename)
+                    masks_info[cat_name] = {"file_name": f'{file_idx}_{cat_name}.png', "area": round(space, 2)}
+                    file_idx += 1
+                else:
+                    pop_cats.append(cat_name)
+
+        for cat in pop_cats:
+            masks_info.pop(cat)
+
+        if masks_info == {}:    # This image and its masks will not be output
             shutil.rmtree(target_dir)
             continue
 
-
-        idx = 0
-        for mask_info in masks_info:
-            if mask_info[0] in target_cat_names:
-                mask_to_png_and_save(mask_info[1], os.path.join(config.output_dir, filenamenoext, f'{idx}_{mask_info[0]}.png'))
-                idx += 1
-
-
+        output_info = {filenamenoext: masks_info}
+        # Output .pkl file of file info
+        with open(os.path.join(config.output_dir, filenamenoext, 'info.pkl'), 'wb') as f:
+            pickle.dump(output_info, f)
 
         if config.output_original_image:
             if not os.path.isfile(os.path.join(config.output_dir, filenamenoext, ext_name)):
