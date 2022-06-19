@@ -4,6 +4,7 @@ from PIL import Image
 import os
 import shutil   # for copy original image
 import torch
+# import cv2
 
 from termcolor import colored   # print colored warnings, errors
 from typing import Dict, List, Any
@@ -24,6 +25,8 @@ class Config:
     output_dir = './results/'
     output_original_image = True
     path_to_config = g_PATH_TO_CONFIG
+    mask_out_threshold = 0.1    # Mask area space / total area 
+    # Too small masks will be ignored
 
     def __init__(self, path_to_config) -> None:
         if os.path.isfile(path_to_config):
@@ -34,6 +37,7 @@ class Config:
                 self.annotation_path = config_dict['annotation_path']
                 self.output_dir = config_dict['output_dir']
                 self.output_original_image = config_dict['output_original_image']
+                self.mask_out_threshold = config_dict['mask_out_threshold']
 
     def get_img_paths(self) -> List:
         '''
@@ -52,20 +56,21 @@ class Config:
 
 
 
-def mask_to_png_and_save(mask_arr: np.ndarray, dest_path: str):
+def mask_to_png_and_save(mask_arr, dest_path: str, accept = True):
     # Use GPU to accelerate
     mask_arr = torch.tensor(mask_arr, dtype=torch.uint8).to(device)
     mask_arr = 255 * mask_arr
     rgb_arr = torch.stack([mask_arr, mask_arr, mask_arr], dim=2)
 
-    # We want this to be async
-    # TODO
-    def save_img(tensor: torch.Tensor, dest_path: str):
+    # kernel = np.ones((3, 3), dtype=np.uint8)
+    # dilate = cv2.dilate(rgb_arr.cpu().numpy(), kernel, 1)
+    def save_img(tensor, dest_path: str):
         
-        img = Image.fromarray(tensor.cpu().numpy(),mode='RGB')
+        img = Image.fromarray(tensor,mode='RGB')
         img.save(dest_path)
 
-    save_img(rgb_arr, dest_path)
+    if accept:
+        save_img(rgb_arr.cpu().numpy(), dest_path)
 
 
 
@@ -85,6 +90,10 @@ def query_segmentation_catid_list(ann_list: List[Dict], target_id: int) -> List:
     if len(returnList) == 0: colored(f"Warning: Unreached target id: {target_id}", "yellow")
     return returnList
 
+def get_mask_space(mask):
+    mask = torch.tensor(mask).to(device)
+    return float(torch.sum(mask)) / (mask.shape[0] * mask.shape[1])
+
 def query_category_name(cat_list: List, target_cat_id: int):
     for cat_dict in cat_list:
         if cat_dict['id'] != target_cat_id: continue
@@ -92,15 +101,16 @@ def query_category_name(cat_list: List, target_cat_id: int):
             return cat_dict['name']
         colored(f"Error: Unreached target category id: {target_cat_id}", "red")
 
-def parse_id_filenamenoext(path: str) -> int:
+def parse_id_filenamenoext(path: str):
     # Because the ids are written in filename, we parse them
     # Located at the end 
     if not (os.path.isfile(path) and (path.endswith('.jpg') or path.endswith('.png'))):
         colored(f'Warning: {path} is not valid and will be skipped.', 'yellow')
     id_string = path[:-4].split('_')[-1]
     filenamenoext = path[:-4].split('/')[-1]
+    _, ext = os.path.splitext(path)
 
-    return int(id_string), filenamenoext
+    return int(id_string), filenamenoext, ext
 
 
 def main():
@@ -112,8 +122,7 @@ def main():
     parent_dict = config.get_parent_ann_dict()
 
     for src_img_path in tqdm(img_paths):
-        id, filenamenoext = parse_id_filenamenoext(src_img_path)
-
+        id, filenamenoext, ext_name = parse_id_filenamenoext(src_img_path)
         # Annotation list, contains `segmentation`, `category_id`
         ann_list = parent_dict['annotations']
         # Images list, contains image `width` and `height`
@@ -123,29 +132,52 @@ def main():
 
         img_height, img_width = query_img_height_width(img_list, id)
         segmentation_list = query_segmentation_catid_list(ann_list, id)
+        target_dir = os.path.join(config.output_dir, filenamenoext)
 
         if len(segmentation_list) == 0:
             colored(f'Warning: cannot find segmentation info of image id {id}')
             continue
-        if not os.path.isdir(os.path.join(config.output_dir, filenamenoext)): os.mkdir(os.path.join(config.output_dir, filenamenoext))
-        for index, seg_catid_dict in enumerate(segmentation_list):
+        
+        if not os.path.isdir(target_dir):
+            os.mkdir(target_dir)
+
+        masks_info = []
+
+
+        for i, seg_catid_dict in enumerate(segmentation_list):
             if isinstance(seg_catid_dict['segmentation'], List):
                 mask_arr = polygons_to_bitmask(seg_catid_dict['segmentation'], img_height, img_width)   # This is the true-false mask
             else: mask_arr = rle_to_bitmask(seg_catid_dict['segmentation'])
             cat_name = query_category_name(cat_list, seg_catid_dict['cat_id'])
 
-            mask_to_png_and_save(mask_arr, os.path.join(config.output_dir, filenamenoext, f'{index}_{cat_name}.png'))
-
-
-            if config.output_original_image:
-                shutil.copy(src_img_path, os.path.join(config.output_dir, filenamenoext))
-
-
-
-
-
+            masks_info.append([cat_name, mask_arr, get_mask_space(mask_arr)])
             
 
+            
+        masks_info.sort(key=lambda x: x[2], reverse=True)
+        target_cat_names = set()
+        for mask_info in masks_info:
+            if mask_info[2] >= config.mask_out_threshold:
+                target_cat_names.add(mask_info[0])
 
-if (__name__ == '__main__'):
+        if len(target_cat_names) == 0:
+            shutil.rmtree(target_dir)
+            continue
+
+
+        idx = 0
+        for mask_info in masks_info:
+            if mask_info[0] in target_cat_names:
+                mask_to_png_and_save(mask_info[1], os.path.join(config.output_dir, filenamenoext, f'{idx}_{mask_info[0]}.png'))
+                idx += 1
+
+
+
+        if config.output_original_image:
+            if not os.path.isfile(os.path.join(config.output_dir, filenamenoext, ext_name)):
+                shutil.copy(src_img_path, target_dir)
+
+
+
+if __name__ == '__main__':
     main()

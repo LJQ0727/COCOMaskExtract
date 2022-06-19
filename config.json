@@ -2,6 +2,7 @@
     "input_dir": "./chosen_bg_images_all/*.jpg",
     "output_dir": "./results/",
     "output_original_image": true,
-    "annotation_path": "./chosen_bg_images_all/coco_annotations_trainval2014/annotations/instances_val2014.json"
+    "annotation_path": "./chosen_bg_images_all/coco_annotations_trainval2014/annotations/instances_val2014.json",
+    "mask_out_threshold": 0.03
 
 }
